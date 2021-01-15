@@ -1,0 +1,182 @@
+
+###### First create channel-artifacts, then run the peer containers ######
+
+export CHANNEL_NAME=customchannel && export PATH=${PWD}/../bin:$PATH && export FABRIC_CFG_PATH=${PWD}/configtx
+
+###### Generating Genesis-block of the system channel
+configtxgen -profile FourOrgsOrdererGenesis -channelID system-channel -outputBlock ./system-genesis-block/genesis.block
+
+###### Creating Channel artifacts
+configtxgen -profile FourOrgsChannel -outputCreateChannelTx ./channel-artifacts/customchannel.tx -channelID $CHANNEL_NAME
+
+###### Creating channel using channel artifacts and channel genesis-block
+export FABRIC_CFG_PATH=$PWD/../config/
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="producerMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/producer.supply-chain.com/users/Admin@producer.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:9053
+
+peer channel create -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com -c $CHANNEL_NAME -f ./channel-artifacts/customchannel.tx --outputBlock ./channel-artifacts/customchannel.block --tls --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+###### Joining channel by peer 
+peer channel join -b ./channel-artifacts/customchannel.block
+
+###### Verify peer has joined channel
+peer channel getinfo -c customchannel
+
+------------------------------------------------------------------------------------------------------
+export FABRIC_CFG_PATH=$PWD/../config/
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="auditorMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/peers/peer0.auditor.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/users/Admin@auditor.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:9075
+
+peer channel fetch 0 ./channel-artifacts/customchannel_auditor.block -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com -c $CHANNEL_NAME --tls --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+peer channel join -b ./channel-artifacts/customchannel_auditor.block
+------------------------------------------------------------------------------------------------------
+
+
+###### Adding on Org to channel using new peer cli(here auditor)
+export ORDERER_CA=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+export CHANNEL_NAME=customchannel
+
+###### Fetching channel config from ordering service as Admin of org who is already a member of channel
+export CORE_PEER_LOCALMSPID="producerMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/producer.supply-chain.com/users/Admin@producer.supply-chain.com/msp
+export CORE_PEER_ADDRESS=peer0.producer.supply-chain.com:9053
+
+###### Fetching latest config block
+peer channel fetch config config_block.pb -o orderer.example.com:7050 -c $CHANNEL_NAME --tls --cafile $ORDERER_CA
+
+###### Converting config_block.pb to config.json containing info of all existing member orgs of channel
+configtxlator proto_decode --input config_block.pb --type common.Block | jq .data.data[0].payload.data.config > config.json
+
+###### modified_config.json contains information of existing member orgs and new org
+jq -s '.[0] * {"channel_group":{"groups":{"Application":{"groups": {"auditorMSP":.[1]}}}}}' config.json ./organizations/peerOrganizations/auditor.supply-chain.com/auditor.json > modified_config.json
+
+###### Converting config.json to config.pb 
+configtxlator proto_encode --input config.json --type common.Config --output config.pb
+
+###### Converting modified_config.json to modified_config.pb 
+configtxlator proto_encode --input modified_config.json --type common.Config --output modified_config.pb
+
+###### Check difference between config and modified_config block and create new binary block
+configtxlator compute_update --channel_id $CHANNEL_NAME --original config.pb --updated modified_config.pb --output auditor_update.pb
+
+###### Converting update binary block to json
+configtxlator proto_decode --input auditor_update.pb --type common.ConfigUpdate | jq . > auditor_update.json
+
+###### Wrapping in an envelope message
+echo '{"payload":{"header":{"channel_header":{"channel_id":"'$CHANNEL_NAME'", "type":2}},"data":{"config_update":'$(cat auditor_update.json)'}}}' | jq . > auditor_update_in_envelope.json
+
+###### Converting envelope.json to envelope.pb
+configtxlator proto_encode --input auditor_update_in_envelope.json --type common.Envelope --output auditor_update_in_envelope.pb
+
+###### Now majority of existing orgs (for now 3 out of 4) need to sign envelope.pb by exporting environment variables from peer cli and running below command
+peer channel signconfigtx -f auditor_update_in_envelope.pb
+
+###### Running above command each time environment variables areexposed for different org
+export CORE_PEER_LOCALMSPID="producerMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/producer.supply-chain.com/users/Admin@producer.supply-chain.com/msp
+export CORE_PEER_ADDRESS=peer0.producer.supply-chain.com:9053
+
+export CORE_PEER_LOCALMSPID="processorMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/processor.supply-chain.com/peers/peer0.processor.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/processor.supply-chain.com/users/Admin@processor.supply-chain.com/msp
+export CORE_PEER_ADDRESS=peer0.processor.supply-chain.com:9052
+
+export CORE_PEER_LOCALMSPID="retailerMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/retailer.supply-chain.com/peers/peer0.retailer.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=/opt/gopath/src/github.com/hyperledger/fabric/peer/organizations/peerOrganizations/retailer.supply-chain.com/users/Admin@retailer.supply-chain.com/msp
+export CORE_PEER_ADDRESS=peer0.retailer.supply-chain.com:9055
+
+###### After majority has signed the envelope.pb block, now update channel command
+peer channel update -f auditor_update_in_envelope.pb -c $CHANNEL_NAME -o orderer.example.com:7050 --tls --cafile $ORDERER_CA
+
+###### Now export environment variables of new org
+export CORE_PEER_LOCALMSPID="auditorMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/peers/peer0.auditor.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/users/Admin@auditor.supply-chain.com/msp
+export CORE_PEER_ADDRESS=peer0.auditor.supply-chain.com:11051
+
+###### Fetching Latest modified block (at 0)
+peer channel fetch 0 customchannel.block -o orderer.example.com:7050 -c $CHANNEL_NAME --tls --cafile $ORDERER_CA
+
+###### Finnally new org peer is joined
+peer channel join -b customchannel.block
+
+###### Deploying chaincode on channel
+export PATH=${PWD}/../bin:$PATH
+export FABRIC_CFG_PATH=$PWD/../config/
+
+peer version
+
+###### Packing chaincode into tar file
+peer lifecycle chaincode package liquor.tar.gz --path ../chaincode/liquor/ --lang node --label basic_1.0
+
+###### Now installing package to all the peer that will endorse a transaction using peer cli
+peer lifecycle chaincode install liquor.tar.gz
+
+###### installing pacjage chaincode to all peer by exporting environment variables for each org and running above command each time
+------------------------------------------------------------------------------------------------------
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="producerMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/producer.supply-chain.com/users/Admin@producer.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:9053
+
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="processorMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/processor.supply-chain.com/peers/peer0.processor.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/processor.supply-chain.com/users/Admin@processor.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:9052
+
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="retailerMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/retailer.supply-chain.com/peers/peer0.retailer.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/retailer.supply-chain.com/users/Admin@retailer.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:9055
+
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="transporterMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/transporter.supply-chain.com/peers/peer0.transporter.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/transporter.supply-chain.com/users/Admin@transporter.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:7054
+
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="auditorMSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/peers/peer0.auditor.supply-chain.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/users/Admin@auditor.supply-chain.com/msp
+export CORE_PEER_ADDRESS=localhost:9075
+------------------------------------------------------------------------------------------------------
+
+###### Approving chaincode package by majority of existing org members (for now 3 out of 5)
+export CC_PACKAGE_ID=basic_1.0:d43120d38f8942360815eb4f2e57da1186505b1715d73764acb4bb76e8ab4d2d
+
+###### Approval to chaincode by majority of org members by exporting environment variables nad running below command each time
+peer lifecycle chaincode approveformyorg -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --channelID customchannel --name basic --version 1.0 --package-id $CC_PACKAGE_ID --sequence 3 --tls --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+###### Finnally commiting chaincode definition to the channel
+peer lifecycle chaincode checkcommitreadiness --channelID customchannel --name basic --version 1.0 --sequence 3 --tls --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --output json
+
+###### commiting chaincode definition
+peer lifecycle chaincode commit -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --channelID customchannel --name basic --version 1.0 --sequence 3 --tls --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --peerAddresses localhost:9053 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt --peerAddresses localhost:9052 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/processor.supply-chain.com/peers/peer0.processor.supply-chain.com/tls/ca.crt --peerAddresses localhost:9055 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/retailer.supply-chain.com/peers/peer0.retailer.supply-chain.com/tls/ca.crt --peerAddresses localhost:7054 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/transporter.supply-chain.com/peers/peer0.transporter.supply-chain.com/tls/ca.crt --peerAddresses localhost:9075 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/peers/peer0.auditor.supply-chain.com/tls/ca.crt 
+
+###### confirming that chaincode is commited to the
+peer lifecycle chaincode querycommitted --channelID customchannel --name basic --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+###### Invoking chaincode function
+peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C customchannel -n basic --peerAddresses localhost:9053 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt --peerAddresses localhost:9052 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/processor.supply-chain.com/peers/peer0.processor.supply-chain.com/tls/ca.crt --peerAddresses localhost:9055 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/retailer.supply-chain.com/peers/peer0.retailer.supply-chain.com/tls/ca.crt --peerAddresses localhost:7054 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/transporter.supply-chain.com/peers/peer0.transporter.supply-chain.com/tls/ca.crt --peerAddresses localhost:9075 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/auditor.supply-chain.com/peers/peer0.auditor.supply-chain.com/tls/ca.crt -c '{"Args":["initLiquor","101","old monk","750","20","delhi"]}'
+
+peer chaincode invoke -C customchannel -n basic -c '{"Args":["initLiquor","101","old monk","750","20","delhi"]}'
+
+peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --keyfile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C customchannel -n basic --peerAddresses localhost:9053 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt  -c '{"Args":["initLiquor","101","old monk","750","20","delhi"]}'
+
+peer chaincode query -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --keyfile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C customchannel -n basic --peerAddresses localhost:9053 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt  -c '{"Args":["init"]}'
+
+peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --keyfile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt --cafile ${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C customchannel -n basic --peerAddresses localhost:9053 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/producer.supply-chain.com/peers/peer0.producer.supply-chain.com/tls/ca.crt  -c '{"Args":["readLiquor","101"]}'

@@ -1,0 +1,20 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# ---------------------------------------------------------------------------
+# "PeerOrgs" - Definition of organizations managing peer nodes
+# ---------------------------------------------------------------------------
+PeerOrgs:
+  # ---------------------------------------------------------------------------
+  # Org3
+  # ---------------------------------------------------------------------------
+  - Name: transporter
+    Domain: transporter.supply-chain.com
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+      SANS:
+        - localhost
+    Users:
+      Count: 1

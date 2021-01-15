@@ -1,0 +1,45 @@
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+---
+################################################################################
+#
+#   Section: Organizations
+#
+#   - This section defines the different organizational identities which will
+#   be referenced later in the configuration.
+#
+################################################################################
+Organizations:
+    - &transporter
+        # DefaultOrg defines the organization which is used in the sampleconfig
+        # of the fabric.git development environment
+        Name: transporterMSP
+
+        # ID to load the MSP definition as
+        ID: transporterMSP
+
+        MSPDir: ../organizations/peerOrganizations/transporter.supply-chain.com/msp
+
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('transporterMSP.admin', 'transporterMSP.peer', 'transporterMSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('transporterMSP.admin', 'transporterMSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('transporterMSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('transporterMSP.peer')"
+
+        AnchorPeers:
+            # AnchorPeers defines the location of peers which can be used
+            # for cross org gossip communication.  Note, this value is only
+            # encoded in the genesis block in the Application section context
+            - Host: peer0.transporter.supply-chain.com
+              Port: 11051
